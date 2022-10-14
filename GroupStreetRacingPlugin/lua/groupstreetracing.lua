@@ -8,44 +8,118 @@ local StreetRaceStatus = {
     Cancelled = 4
 }
 
+local EventType = {
+    None = 0,
+    RacePlayerJoined = 1,
+    RacePlayerLeft = 2,
+    RaceEnded = 3,
+    PlayerCrashed = 4,
+    PlayerLeftBehind = 5,
+    CountdownStart = 6
+}
+
 local ownSessionId = ac.getCar(0).sessionID
 
 local carsWithHazards = {}
+local carsInRace = {}
 local packetLen = 20
 
-local packetLen = 20
-local carsWithHazardsEvent = ac.OnlineEvent({
-    ac.StructItem.key("groupStreetRacingHazardsPacket"),
+local street_race_status = {
+    CHALLENGING = 1,
+    STARTING = 2,
+    IN_PROGRESS = 3,
+    ENDED = 4,
+    CANCELLED = 5,
+    COUNTDOWN = 6
+}
+
+local racer_status = {
+    NONE = 0,
+    NOT_READY = 1,
+    READY = 2,
+    RACING = 3,
+    ELIMINATED = 4,
+    CRASHED = 5
+}
+
+local raceStatus;
+local raceStartTime = -1
+
+local currentRaceEvent = ac.OnlineEvent({
+    ac.StructItem.key("groupStreetRacingCurrentRacePacket"),
     SessionIds = ac.StructItem.array(ac.StructItem.byte(), packetLen),
-    HealthOfCars = ac.StructItem.array(ac.StructItem.byte(), packetLen)        
+    HealthOfCars = ac.StructItem.array(ac.StructItem.byte(), packetLen),
+    RacersStatus = ac.StructItem.array(ac.StructItem.byte(), packetLen),
+    RaceStatus = ac.StructItem.byte()    
 }, function(sender, data)
     -- only accept packets from server
     if sender ~= nil then
         return
     end
-    carsWithHazards = {}
+    carsInRace = {}
     for i = 0, packetLen - 1 do
-        
+
         local sessionId = data.SessionIds[i]
         if sessionId ~= 255 then
-            carsWithHazards[i] = {
+            carsInRace[i] = {
                 SessionId = sessionId,
                 PositionInRace = i + 1,
-                Health = data.HealthOfCars[i]
+                Health = data.HealthOfCars[i],
+                Status = data.RacersStatus[i]
             }
         else
-            carsWithHazards[i] = {
+            carsInRace[i] = {
                 SessionId = 255,
                 PositionInRace = -1,
-                Health = -1
+                Health = -1,
+                Status = racer_status.NONE
             }
         end
     end
-    ac.debug("carsWithHazardsS5", carsWithHazards[5].SessionId)
-    ac.debug("carsWithHazardsH5", carsWithHazards[5].Health)
-    ac.debug("carsWithHazardsS", carsWithHazards[0].SessionId)
-    ac.debug("carsWithHazardsH", carsWithHazards[0].Health)
+    raceStatus = data.RaceStatus
+    ac.debug("raceStatus", data.RaceStatus)
+    ac.debug("car1SessionId", carsInRace[0].SessionId)
+    ac.debug("car1PositionInRace", carsInRace[0].PositionInRace)
+    ac.debug("car1Health", carsInRace[0].Health)
+    ac.debug("car1Status", carsInRace[0].Status)
 end)
+
+local lastEventType;
+local lastEventData;
+
+local raceUpdateEvent = ac.OnlineEvent({
+    ac.StructItem.key("groupStreetRacingUpdateEventPacket"),
+    EventType = ac.StructItem.byte(),
+    EventData = ac.StructItem.int32(),
+}, function(sender, data)
+    -- only accept packets from server
+    if sender ~= nil then
+        return
+    end
+
+    lastEventType = data.EventType
+    lastEventData = data.EventData
+
+    if data.EventType == EventType.CountdownStart then
+        raceStartTime = data.EventData
+    end
+
+    if data.EventType == EventType.PlayerCrashed then
+        ui.toast(ui.Icons.WeatherClear, GetDriverNameBySessionId(data.EventData) .. " has crashed out of the race.")
+    end
+
+    if data.EventType == EventType.PlayerLeftBehind then
+        ui.toast(ui.Icons.WeatherClear, GetDriverNameBySessionId(data.EventData) .. " has been elimenated from the race.")
+    end
+
+    if data.EventType == EventType.RaceEnded then
+        ui.toast(ui.Icons.WeatherClear, "The race has ended.")
+    end
+
+    ac.debug("eventType", data.EventType)
+    ac.debug("eventData", data.EventData)
+end)
+
 --   function GetOwnRanking(callback)
 --     web.get(leaderboardUrl .. "/" .. ac.getUserSteamID(), function (err, response)
 --       callback(stringify.parse(response.body))
@@ -63,8 +137,24 @@ function GetDriverNameBySessionId(sessionId)
 end
 
 function script.drawUI()
+    local currentTime = GetSessionTime()
+    local raceTimeElapsed = currentTime - raceStartTime
+    if lastEventType == EventType.CountdownStart then
+        if raceTimeElapsed > -3000 and raceTimeElapsed < 0 then            
+            local text = math.ceil(raceTimeElapsed / 1000 * -1)
+            DrawTextCentered(text)
+        elseif raceTimeElapsed > 0 then
+            if raceTimeElapsed < 1000 then
+                DrawTextCentered("Go!")
+            end
+        end
+    end
     -- DrawTextCentered("You lost the race.")
     RacePartyHUD()
+end
+
+function GetSessionTime()
+    return ac.getSim().timeToSessionStart * -1
 end
 
 function DrawTextCentered(text)
@@ -73,7 +163,7 @@ function DrawTextCentered(text)
     ui.transparentWindow('raceText', vec2(uiState.windowSize.x / 2 - 250, uiState.windowSize.y / 2 - 250), vec2(500, 100)
         ,
         function()
-            ui.pushFont(ui.Font.Huge)
+            ui.pushFont(ui.Font.Huge)            
 
             local size = ui.measureText(text)
             ui.setCursorX(ui.getCursorX() + ui.availableSpaceX() / 2 - (size.x / 2))
@@ -83,31 +173,58 @@ function DrawTextCentered(text)
         end)
 end
 
-function PrintCarWithHazardsRow(name, position, health)
+function PrintCarWithHazardsRow(name, position, health, status)
+    ui.text(tostring(name))
+    ui.nextColumn()
+    ui.text(tostring(position))
+    ui.nextColumn()
+    -- ui.text(tostring(health))
+    local barSize = vec2(ui.availableSpaceX(), 30)
+    local barColor = rgbm(1, 1, 1, 1)
+    local progress = (health + .0) / 100
+    barColor:setLerp(rgbm.colors.red, rgbm.colors.white, progress)
+    ui.drawRect(ui.getCursor(), ui.getCursor() + barSize, barColor);
+    local p1, p2
+    p1 = ui.getCursor()
+    p2 = ui.getCursor() + vec2(barSize.x * progress, barSize.y)
+
+    ui.drawRectFilled(p1, p2, barColor)
+    ui.dummy(barSize)
+
+    ui.nextColumn()
+    ui.text(tostring(status))
+    ui.nextColumn()
+end
+
+function PrintCarWithHazardsRowHeader(name, position, health, status)
     ui.text(tostring(name))
     ui.nextColumn()
     ui.text(tostring(position))
     ui.nextColumn()
     ui.text(tostring(health))
     ui.nextColumn()
+    ui.text(tostring(status))
+    ui.nextColumn()
 end
 
 function RacePartyHUD()
     ui.childWindow('groupStreetRacingList', vec2(0, 275), true, ui.WindowFlags.None, function()
-        if #carsWithHazards == 0 then
-            ui.text("No cars with hazards yet")
+        if #carsInRace == 0 then
+            ui.text("No cars in race yet")
             ac.debug("nocars", "yes")
         else
-            ui.columns(3)
+            ui.columns(4)
             ui.setColumnWidth(0, 200)
             ui.setColumnWidth(1, 200)
             ui.setColumnWidth(2, 200)
+            ui.setColumnWidth(3, 200)
 
-            PrintCarWithHazardsRow("Racer", "Pos", "Health")
+            PrintCarWithHazardsRowHeader("Racer", "Pos", "Health", "Status")
 
-            for i, carwithHaz in pairs(carsWithHazards) do
-                if carwithHaz.SessionId ~= 255 then
-                    PrintCarWithHazardsRow(GetDriverNameBySessionId(carwithHaz.SessionId), carwithHaz.PositionInRace, carwithHaz.Health)
+            for i, carsInRace in pairs(carsInRace) do
+                if carsInRace.SessionId ~= 255 then
+                    PrintCarWithHazardsRow(GetDriverNameBySessionId(carsInRace.SessionId), carsInRace.PositionInRace,
+                        carsInRace.Health, carsInRace.Status)
                 end
             end
 

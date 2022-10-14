@@ -13,12 +13,10 @@ public class EntryCarRace
     private readonly EntryCarManager _entryCarManager;
     private readonly RaceChallengePlugin _plugin;
     private readonly EntryCar _entryCar;
-    private readonly Race.Factory _raceFactory;
-    
-    public int LightFlashCount { get; internal set; }
-    
-    internal Race? CurrentRace { get; set; }
+    private readonly Race.Factory _raceFactory;    
 
+    public int LightFlashCount { get; internal set; }    
+    internal Race? CurrentRace { get; set; }
     private long LastLightFlashTime { get; set; }
     private long LastRaceChallengeTime { get; set; }
 
@@ -32,6 +30,7 @@ public class EntryCarRace
         _entryCar.PositionUpdateReceived += OnPositionUpdateReceived;
         _entryCar.ResetInvoked += OnResetInvoked;
     }
+    
 
     private void OnResetInvoked(EntryCar sender, EventArgs args)
     {

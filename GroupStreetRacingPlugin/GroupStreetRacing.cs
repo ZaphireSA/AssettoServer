@@ -19,69 +19,63 @@ namespace GroupStreetRacingPlugin
         private readonly CSPFeatureManager _cspFeatureManager;
         private readonly EntryCarManager _entryCarManager;
         private readonly ACServerConfiguration _acServerConfiguration;
-        private readonly Dictionary<int, EntryCarForStreetRace> _instances = new Dictionary<int, EntryCarForStreetRace>();
+        public readonly Dictionary<int, EntryCarForStreetRace> EntryCars = new Dictionary<int, EntryCarForStreetRace>();
+        private readonly SessionManager _sessionManager;
+        private readonly GroupStreetRacingConfiguration _configuration;
+        //public List<EntryCarForStreetRace> CarsWithHazardsOn = new List<EntryCarForStreetRace>();
 
-        public List<EntryCarForStreetRace> CarsWithHazardsOn = new List<EntryCarForStreetRace>();
+        //public void RemoveCarFromHazardList(EntryCarForStreetRace car)
+        //{
+        //    CarsWithHazardsOn.Remove(car);
+        //    UpdateHazardList();
+        //}
 
-        public void RemoveCarFromHazardList(EntryCarForStreetRace car)
-        {
-            CarsWithHazardsOn.Remove(car);
-            UpdateHazardList();
-        }
+        //public void AddCarFromHazardList(EntryCarForStreetRace car)
+        //{            
+        //    CarsWithHazardsOn.Add(car);
+        //    UpdateHazardList();
+        //}
 
-        public void AddCarFromHazardList(EntryCarForStreetRace car)
-        {            
-            CarsWithHazardsOn.Add(car);
-            UpdateHazardList();
-        }
+        //public void UpdateHazardList()
+        //{
+        //    byte[] sessionIds = new byte[GroupStreetRacingHazardsPacket.Length];
+        //    byte[] healthOfCars = new byte[GroupStreetRacingHazardsPacket.Length];
+        //    Array.Fill(sessionIds, (byte)255);
+        //    Array.Fill(healthOfCars, (byte)255);
 
-        public void UpdateHazardList()
-        {
-            byte[] sessionIds = new byte[GroupStreetRacingHazardsPacket.Length];
-            byte[] healthOfCars = new byte[GroupStreetRacingHazardsPacket.Length];
-            Array.Fill(sessionIds, (byte)255);
-            Array.Fill(healthOfCars, (byte)255);
+        //    for (var s = 0; s < CarsWithHazardsOn.Count; s++)
+        //    {
+        //        sessionIds[s] = CarsWithHazardsOn[s].EntryCar.SessionId;
+        //        healthOfCars[s] = (byte) CarsWithHazardsOn[s].CarHealth;
+        //    }
 
-            for (var s = 0; s < CarsWithHazardsOn.Count; s++)
-            {
-                sessionIds[s] = CarsWithHazardsOn[s].EntryCar.SessionId;
-                healthOfCars[s] = (byte) CarsWithHazardsOn[s].CarHealth;
-            }
+        //    Log.Debug("First Car S: " + sessionIds[0] + " , health: " + healthOfCars[0]);
 
-            Log.Debug("First Car S: " + sessionIds[0] + " , health: " + healthOfCars[0]);
+        //    var packet = new GroupStreetRacingHazardsPacket(sessionIds, healthOfCars);
 
-            var packet = new GroupStreetRacingHazardsPacket(sessionIds, healthOfCars);
+        //    foreach(var carInstance in _instances)
+        //    {
+        //        var client = carInstance.Value.EntryCar.Client;
+        //        if (client == null || !client.HasSentFirstUpdate)
+        //            continue;
 
-            foreach(var carInstance in _instances)
-            {
-                var client = carInstance.Value.EntryCar.Client;
-                if (client == null || !client.HasSentFirstUpdate)
-                    continue;
-
-                client?.SendPacket(packet);
-            }
-
-            //for (int i = 0; i < sessionIds.Count; i += AiDebugPacket.Length)
-            //{
-            //var packet = new AiDebugPacket();
-            //Array.Fill(packet.SessionIds, (byte)255);
-
-            //new ArraySegment<byte>(sessionIds.Array, i, Math.Min(AiDebugPacket.Length, sessionIds.Count - i)).CopyTo(packet.SessionIds);                
-
-            //player.Client?.SendPacket(packet);
-            //}
-        }
+        //        client?.SendPacket(packet);
+        //    }
+        //}
 
         public GroupStreetRacing(GroupStreetRacingConfiguration configuration,
             ACServerConfiguration acServerConfiguration,
             EntryCarManager entryCarManager,
             CSPFeatureManager cspFeatureManager,
             CSPServerScriptProvider scriptProvider,
+            SessionManager sessionManager,
             IHostApplicationLifetime applicationLifetime) : base(applicationLifetime)
         {
             _acServerConfiguration = acServerConfiguration;
             _cspFeatureManager = cspFeatureManager;
             _entryCarManager = entryCarManager;
+            _sessionManager = sessionManager;
+            _configuration = configuration;
             Log.Debug("Sample plugin constructor called! Hello: {Hello}", configuration.Hello);
 
             if (_acServerConfiguration.Extra.EnableClientMessages)
@@ -99,12 +93,12 @@ namespace GroupStreetRacingPlugin
 
             foreach (EntryCar entryCar in _entryCarManager.EntryCars)
             {
-                _instances.Add((int)entryCar.SessionId, new EntryCarForStreetRace(entryCar, this));
+                EntryCars.Add((int)entryCar.SessionId, new EntryCarForStreetRace(entryCar, this, _sessionManager, _configuration));
                 //raceChallengePlugin._instances.Add((int)entryCar.SessionId, raceChallengePlugin._entryCarRaceFactory(entryCar));
             }
 
             return Task.CompletedTask;
-        }
+        }        
 
         private void OnSessionChanged(SessionManager sender, SessionChangedEventArgs args)
         {
