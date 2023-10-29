@@ -51,21 +51,26 @@ namespace GroupStreetRacingPlugin
             if (HasStarted)
                 return Task.CompletedTask;
 
-            HasStarted = true;            
+            HasStarted = true;
             Task.Run(new Func<Task>(RaceAsync));
             return Task.CompletedTask;
         }
 
         private async Task RaceAsync()
         {
-            foreach(var car in _raceCars)
+            foreach (var car in _raceCars)
             {
                 if (car.Car.EntryCar.Client != null && car.Car.EntryCar.Client.HasSentFirstUpdate)
+                {
                     car.Car.EntryCar.Client.Collision += Client_Collision;
+                    car.Car.EntryCar.ResetInvoked += EntryCar_ResetInvoked;
+                    //EntryCar.ResetInvoked += _entryCar_ResetInvoked;
+                }
+                car.Status = RacerStatus.Racing;
             }
             _raceStatus = StreetRaceStatus.Countdown;
 
-            SendEventUpdateToAll(RaceUpdateEvent.CountdownStart, _sessionManager.CurrentSession.SessionTimeMilliseconds + 5000);            
+            SendEventUpdateToAll(RaceUpdateEvent.CountdownStart, _sessionManager.CurrentSession.SessionTimeMilliseconds + 5000);
             await Task.Delay(5000);
 
             _raceStatus = StreetRaceStatus.InProgress;
@@ -75,13 +80,14 @@ namespace GroupStreetRacingPlugin
                 //Update race positions
                 _raceCars = _raceCars.OrderBy(x => x, new StreetCarPositionComparer()).ToList();
 
-                for(var i = 0; i < _raceCars.Count; i++)
+                for (var i = 0; i < _raceCars.Count; i++)
                 {
                     _raceCars[i].PositionInRace = i + 1;
                     if (i == 0)
                     {
                         _raceCars[i].DistanceFromRaceLeader = 0;
-                    } else
+                    }
+                    else
                     {
                         float distanceFromLeader = Vector3.DistanceSquared(_raceCars[0].Car.EntryCar.Status.Position, _raceCars[i].Car.EntryCar.Status.Position);
                         _raceCars[i].DistanceFromRaceLeader = distanceFromLeader;
@@ -92,11 +98,16 @@ namespace GroupStreetRacingPlugin
                             {
                                 _raceCars[i].Status = RacerStatus.Eliminated;
                                 ClearRaceDetailsForCar(_raceCars[i].Car.EntryCar, StreetRaceStatus.Ended);
-                                SendEventUpdateToAll(RaceUpdateEvent.PlayerLeftBehind, _raceCars[i].Car.EntryCar.Client.SessionId);                             
+                                SendEventUpdateToAll(RaceUpdateEvent.PlayerLeftBehind, _raceCars[i].Car.EntryCar.Client.SessionId);
                             }
                         }
                     }
-                        
+
+                    if (_raceCars[i]?.Car?.EntryCar?.Client == null && _raceCars[i].Status == RacerStatus.Racing)
+                    {
+                        _raceCars[i].Status = RacerStatus.Disconnected;
+                    }
+
                 }
 
                 //Send race detail to clients
@@ -109,9 +120,20 @@ namespace GroupStreetRacingPlugin
             }
         }
 
+        private void EntryCar_ResetInvoked(EntryCar sender, EventArgs args)
+        {
+            var car = _raceCars.FirstOrDefault(x => x.Car.EntryCar.SessionId == sender.SessionId);
+            if (car != null)
+            {
+                car.Status = RacerStatus.BackToPit;
+                ClearRaceDetailsForCar(car.Car.EntryCar, StreetRaceStatus.Ended);
+                SendEventUpdateToAll(RaceUpdateEvent.RacePlayerLeft, car.Car.EntryCar.Client.SessionId);
+            }
+        }
+
         public void SendEventUpdateToCar(RaceUpdateEvent challengeEvent, Int32 eventData, EntryCar car)
         {
-            var packet = new GroupStreetRacingUpdateEventPacket(challengeEvent, eventData);            
+            var packet = new GroupStreetRacingUpdateEventPacket(challengeEvent, eventData);
 
             var client = car.Client;
             if (client == null || !client.HasSentFirstUpdate)
@@ -125,7 +147,7 @@ namespace GroupStreetRacingPlugin
             var packet = new GroupStreetRacingUpdateEventPacket(challengeEvent, eventData);
 
             foreach (var car in _raceCars)
-            {                
+            {
                 var client = car.Car.EntryCar.Client;
                 if (client == null || !client.HasSentFirstUpdate)
                     continue;
@@ -138,7 +160,7 @@ namespace GroupStreetRacingPlugin
         {
             byte[] sessionIds = new byte[GroupStreetRacingCurrentRacePacket.Length];
             byte[] healthOfCars = new byte[GroupStreetRacingCurrentRacePacket.Length];
-            byte[] racersStatus = new byte[GroupStreetRacingCurrentRacePacket.Length];            
+            byte[] racersStatus = new byte[GroupStreetRacingCurrentRacePacket.Length];
             Array.Fill(sessionIds, (byte)255);
             Array.Fill(healthOfCars, (byte)255);
             Array.Fill(racersStatus, (byte)RacerStatus.None);
@@ -152,7 +174,7 @@ namespace GroupStreetRacingPlugin
 
             var packet = new GroupStreetRacingCurrentRacePacket(sessionIds, healthOfCars, racersStatus, _raceStatus);
 
-            foreach(var car in _raceCars)
+            foreach (var car in _raceCars)
             {
                 if (car.Status == RacerStatus.Eliminated || car.Status == RacerStatus.Crashed) continue;
 
@@ -195,7 +217,7 @@ namespace GroupStreetRacingPlugin
 
 
             foreach (var car in _raceCars)
-            {                
+            {
                 var client = car.Car.EntryCar.Client;
                 if (client == null || !client.HasSentFirstUpdate)
                     continue;
@@ -211,14 +233,15 @@ namespace GroupStreetRacingPlugin
             {
                 car.Health = Math.Clamp(car.Health - (int)(args.Speed / 3), 0, 100);
                 Log.Debug("Health Before: " + car.Health + ", after: " + car.Health + ", car: " + car.Car.EntryCar.SessionId);
-                if (car.Health <= 0) { 
+                if (car.Health <= 0)
+                {
                     car.Status = RacerStatus.Crashed;
                     ClearRaceDetailsForCar(car.Car.EntryCar, StreetRaceStatus.Ended);
                     SendEventUpdateToAll(RaceUpdateEvent.PlayerCrashed, car.Car.EntryCar.Client.SessionId);
                 }
                 UpdateClientsWithRaceDetails();
             }
-            
+
 
             //if (sender.SessionId == EntryCar.SessionId)
             //{
@@ -242,15 +265,18 @@ namespace GroupStreetRacingPlugin
             try
             {
                 foreach (var car in _raceCars)
-                {      
+                {
                     if (car?.Car?.EntryCar?.Client != null)
+                    {
                         car.Car.EntryCar.Client.Collision -= Client_Collision;
+                        car.Car.EntryCar.ResetInvoked -= EntryCar_ResetInvoked;
+                    }
                 }
-
                 ClearRaceDetailsForCars(StreetRaceStatus.Ended);
                 SendEventUpdateToAll(RaceUpdateEvent.RaceEnded, -1);
+
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
                 Log.Error(ex, "Error finishing race");
             }
@@ -267,7 +293,8 @@ namespace GroupStreetRacingPlugin
                 if (_raceCars.Count == 1)
                 {
                     Cancel();
-                } else if (_raceCars.Count > 1)
+                }
+                else if (_raceCars.Count > 1)
                 {
                     StartAsync();
                 }
@@ -315,10 +342,10 @@ namespace GroupStreetRacingPlugin
                 //this.Follower = this.Challenger;
             }
 
-            return true;        
+            return true;
         }
 
-        
+
     }
 
     public class StreetCarPositionComparer : IComparer<StreetRaceCar>
@@ -326,7 +353,44 @@ namespace GroupStreetRacingPlugin
         public int Compare(StreetRaceCar? x, StreetRaceCar? y)
         {
             if (x == null || y == null) return 0;
-            return WhichCarInFront(x.Car.EntryCar, y.Car.EntryCar);
+            if (x.Status == RacerStatus.Racing && y.Status == RacerStatus.Racing)
+                return WhichCarInFront(x.Car.EntryCar, y.Car.EntryCar);
+
+            if (x.Status != RacerStatus.Racing && y.Status != RacerStatus.Racing)
+            {
+                return 0;
+            }
+
+            if (x.Status == RacerStatus.Racing && y.Status != RacerStatus.Racing)
+            {
+                return -1;
+            }
+            else if (x.Status != RacerStatus.Racing && y.Status == RacerStatus.Racing)
+            {
+                return 1;
+            }
+
+            if (x.Status == RacerStatus.Eliminated && y.Status == RacerStatus.Crashed)
+            {
+                return -1;
+            }
+            else if (x.Status == RacerStatus.Crashed && y.Status == RacerStatus.Eliminated)
+            {
+                return 1;
+            }
+
+            if ((x.Status == RacerStatus.Crashed || x.Status == RacerStatus.Eliminated)
+                && (y.Status == RacerStatus.Disconnected || y.Status == RacerStatus.BackToPit))
+            {
+                return -1;
+            }
+            else if ((y.Status == RacerStatus.Crashed || y.Status == RacerStatus.Eliminated)
+                && (x.Status == RacerStatus.Disconnected || x.Status == RacerStatus.BackToPit))
+            {
+                return 1;
+            }
+
+            return 0;
         }
 
         private int WhichCarInFront(EntryCar car1, EntryCar car2)
@@ -359,7 +423,7 @@ namespace GroupStreetRacingPlugin
             return 0;
         }
 
-        
+
     }
 
     public class StreetRaceCar
@@ -379,7 +443,7 @@ namespace GroupStreetRacingPlugin
             DistanceFromRaceLeader = 0;
         }
 
-        
+
     }
 
     public enum StreetRaceStatus : byte
@@ -399,7 +463,9 @@ namespace GroupStreetRacingPlugin
         Ready = 2,
         Racing = 3,
         Eliminated = 4,
-        Crashed = 5
+        Crashed = 5,
+        Disconnected = 6,
+        BackToPit = 7
     }
 
     public enum RaceUpdateEvent : byte

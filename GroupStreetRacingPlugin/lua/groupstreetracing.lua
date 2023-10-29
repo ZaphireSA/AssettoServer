@@ -39,7 +39,9 @@ local racer_status = {
     READY = 2,
     RACING = 3,
     ELIMINATED = 4,
-    CRASHED = 5
+    CRASHED = 5,
+    DISCONNECTED = 6,
+    BACK_TO_PIT = 7
 }
 
 local raceStatus;
@@ -50,7 +52,7 @@ local currentRaceEvent = ac.OnlineEvent({
     SessionIds = ac.StructItem.array(ac.StructItem.byte(), packetLen),
     HealthOfCars = ac.StructItem.array(ac.StructItem.byte(), packetLen),
     RacersStatus = ac.StructItem.array(ac.StructItem.byte(), packetLen),
-    RaceStatus = ac.StructItem.byte()    
+    RaceStatus = ac.StructItem.byte()
 }, function(sender, data)
     -- only accept packets from server
     if sender ~= nil then
@@ -140,7 +142,7 @@ function script.drawUI()
     local currentTime = GetSessionTime()
     local raceTimeElapsed = currentTime - raceStartTime
     if lastEventType == EventType.CountdownStart then
-        if raceTimeElapsed > -3000 and raceTimeElapsed < 0 then            
+        if raceTimeElapsed > -6000 and raceTimeElapsed < 0 then
             local text = math.ceil(raceTimeElapsed / 1000 * -1)
             DrawTextCentered(text)
         elseif raceTimeElapsed > 0 then
@@ -163,7 +165,7 @@ function DrawTextCentered(text)
     ui.transparentWindow('raceText', vec2(uiState.windowSize.x / 2 - 250, uiState.windowSize.y / 2 - 250), vec2(500, 100)
         ,
         function()
-            ui.pushFont(ui.Font.Huge)            
+            ui.pushFont(ui.Font.Huge)
 
             local size = ui.measureText(text)
             ui.setCursorX(ui.getCursorX() + ui.availableSpaceX() / 2 - (size.x / 2))
@@ -179,7 +181,7 @@ function PrintCarWithHazardsRow(name, position, health, status)
     ui.text(tostring(position))
     ui.nextColumn()
     -- ui.text(tostring(health))
-    local barSize = vec2(ui.availableSpaceX(), 30)
+    local barSize = vec2(ui.availableSpaceX(), 15)
     local barColor = rgbm(1, 1, 1, 1)
     local progress = (health + .0) / 100
     barColor:setLerp(rgbm.colors.red, rgbm.colors.white, progress)
@@ -192,8 +194,31 @@ function PrintCarWithHazardsRow(name, position, health, status)
     ui.dummy(barSize)
 
     ui.nextColumn()
-    ui.text(tostring(status))
-    ui.nextColumn()
+
+    if status == racer_status.READY then
+        ui.text("Ready")
+        ui.nextColumn()
+    elseif status == racer_status.RACING then
+        ui.text("Racing")
+        ui.nextColumn()
+    elseif status == racer_status.CRASHED then
+        ui.text("Crashed")
+        ui.nextColumn()
+    elseif status == racer_status.ELIMINATED then
+        ui.text("Eliminated")
+        ui.nextColumn()
+    elseif status == racer_status.BACK_TO_PIT then
+        ui.text("Back to pit")
+        ui.nextColumn()
+    elseif status == racer_status.DISCONNECTED then
+        ui.text("Disconnected")
+        ui.nextColumn()
+    else
+        ui.text(tostring(status))
+        ui.nextColumn()
+    end
+
+
 end
 
 function PrintCarWithHazardsRowHeader(name, position, health, status)
