@@ -1,4 +1,4 @@
-﻿using System.IO;
+﻿using AssettoServer.Server.Ai.Splines;
 using AssettoServer.Server.Configuration;
 using AssettoServer.Server.OpenSlotFilters;
 using AssettoServer.Server.Plugin;
@@ -31,28 +31,10 @@ public class AiModule : Module
                 builder.RegisterType<DynamicTrafficDensity>().As<IHostedService>().SingleInstance();
             }
 
-
-            string contentPath = "content";
-            const string contentPathCMWorkaround = "content~tmp";
-            // CM renames the content folder to content~tmp when enabling the "Disable integrity verification" checkbox. We still need to load an AI spline from there, even when checksums are disabled
-            if (!Directory.Exists(contentPath) && Directory.Exists(contentPathCMWorkaround))
-            {
-                contentPath = contentPathCMWorkaround;
-            }
-
-            string mapAiBasePath = Path.Join(contentPath, "tracks/" + _configuration.Server.Track + "/ai/");
-            TrafficMap trafficMap;
-            if (File.Exists(mapAiBasePath + "traffic_map.obj"))
-            {
-                trafficMap = WavefrontObjParser.ParseFile(mapAiBasePath + "traffic_map.obj", _configuration.Extra.AiParams.LaneWidthMeters);
-            } 
-            else
-            {
-                var parser = new FastLaneParser(_configuration);
-                trafficMap = parser.FromFiles(mapAiBasePath);
-            }
-
-            builder.RegisterInstance(trafficMap).AsSelf();
+            builder.RegisterType<AiSplineWriter>().AsSelf();
+            builder.RegisterType<FastLaneParser>().AsSelf();
+            builder.RegisterType<AiSplineLocator>().AsSelf();
+            builder.Register((AiSplineLocator locator) => locator.Locate()).AsSelf().SingleInstance();
         }
     }
 }

@@ -2,7 +2,7 @@
 using System.Threading;
 using System.Threading.Tasks;
 using AssettoServer.Server.Configuration;
-using AssettoServer.Utils;
+using AssettoServer.Shared.Services;
 using Microsoft.Extensions.Hosting;
 
 namespace AssettoServer.Server.UserGroup;

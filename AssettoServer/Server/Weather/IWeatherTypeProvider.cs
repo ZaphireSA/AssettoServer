@@ -1,13 +1,8 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿using AssettoServer.Shared.Weather;
 
-namespace AssettoServer.Server.Weather
+namespace AssettoServer.Server.Weather;
+
+public interface IWeatherTypeProvider
 {
-    public interface IWeatherTypeProvider
-    {
-        public WeatherType GetWeatherType(WeatherFxType id);
-    }
+    public WeatherType GetWeatherType(WeatherFxType id);
 }

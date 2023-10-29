@@ -1,9 +1,9 @@
 ﻿using System.Numerics;
-using AssettoServer.Network.Packets.Incoming;
-using AssettoServer.Network.Packets.Outgoing;
-using AssettoServer.Network.Packets.Shared;
 using AssettoServer.Network.Tcp;
 using AssettoServer.Server;
+using AssettoServer.Shared.Network.Packets.Incoming;
+using AssettoServer.Shared.Network.Packets.Outgoing;
+using AssettoServer.Shared.Network.Packets.Shared;
 
 namespace RaceChallengePlugin;
 
@@ -122,7 +122,7 @@ public class EntryCarRace
                             CurrentRace = null;
                             _plugin.GetRace(car).CurrentRace = null;
 
-                            ChatMessage timeoutMessage = new ChatMessage { SessionId = 255, Message = $"Race request has timed out." };
+                            ChatMessage timeoutMessage = new ChatMessage { SessionId = 255, Message = "Race request has timed out." };
                             _entryCar.Client?.SendPacket(timeoutMessage);
                             car.Client?.SendPacket(timeoutMessage);
                         }
@@ -135,7 +135,7 @@ public class EntryCarRace
     private void ChallengeNearbyCar()
     {
         EntryCar? bestMatch = null;
-        float distanceSquared = 30 * 30;
+        const float distanceSquared = 30 * 30;
 
         foreach(EntryCar car in _entryCarManager.EntryCars)
         {

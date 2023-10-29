@@ -1,17 +1,19 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using AssettoServer.Network.Packets;
-using AssettoServer.Network.Packets.Incoming;
 using AssettoServer.Network.Tcp;
 using AssettoServer.Server;
 using AssettoServer.Server.Configuration;
+using AssettoServer.Shared.Model;
+using AssettoServer.Shared.Network.Packets;
+using AssettoServer.Shared.Network.Packets.Incoming;
+using AssettoServer.Shared.Services;
 using AssettoServer.Utils;
 using Microsoft.Extensions.Hosting;
-using NanoSockets;
 using Serilog;
 
 namespace AssettoServer.Network.Udp;
@@ -21,61 +23,52 @@ public class ACUdpServer : CriticalBackgroundService
     private readonly ACServerConfiguration _configuration;
     private readonly SessionManager _sessionManager;
     private readonly EntryCarManager _entryCarManager;
+    private readonly CSPClientMessageHandler _clientMessageHandler;
     private readonly ushort _port;
-    private Socket _socket;
+    private readonly Socket _socket;
+    
+    private readonly ConcurrentDictionary<SocketAddress, EntryCar> _endpointCars = new();
+    private static readonly byte[] CarConnectResponse = { (byte)ACServerProtocol.CarConnect };
+    private readonly byte[] _lobbyCheckResponse;
 
-    private readonly ConcurrentDictionary<Address, EntryCar> _endpointCars = new();
-
-    public ACUdpServer(SessionManager sessionManager, ACServerConfiguration configuration, EntryCarManager entryCarManager, IHostApplicationLifetime applicationLifetime) : base(applicationLifetime)
+    public ACUdpServer(SessionManager sessionManager,
+        ACServerConfiguration configuration,
+        EntryCarManager entryCarManager,
+        IHostApplicationLifetime applicationLifetime,
+        CSPClientMessageHandler clientMessageHandler) : base(applicationLifetime)
     {
         _sessionManager = sessionManager;
         _configuration = configuration;
         _entryCarManager = entryCarManager;
+        _clientMessageHandler = clientMessageHandler;
         _port = _configuration.Server.UdpPort;
+        _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        
+        _lobbyCheckResponse = new byte[3];
+        _lobbyCheckResponse[0] = (byte)ACServerProtocol.LobbyCheck;
+        ushort httpPort = _configuration.Server.HttpPort;
+        MemoryMarshal.Write(_lobbyCheckResponse.AsSpan()[1..], in httpPort);
     }
     
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         Log.Information("Starting UDP server on port {Port}", _port);
         
-        UDP.Initialize();
-        
-        _socket = UDP.Create(256 * 1024, 256 * 1024);
-        var address = new Address
-        {
-            Port = _port
-        };
-
-        if (UDP.SetIP(ref address, "0.0.0.0") != Status.OK)
-        {
-            throw new InvalidOperationException("Could not set UDP address");
-        }
-        
-        if (UDP.Bind(_socket, ref address) != 0)
-        {
-            throw new InvalidOperationException($"Could not bind UDP socket. Maybe the port is already in use?");
-        }
-        
+        _socket.Bind(new IPEndPoint(IPAddress.Any, _port));
         await Task.Factory.StartNew(() => ReceiveLoop(stoppingToken), TaskCreationOptions.LongRunning);
     }
 
     private void ReceiveLoop(CancellationToken stoppingToken)
     {
         byte[] buffer = new byte[1500];
-        var address = new Address();
+        var address = new SocketAddress(AddressFamily.InterNetwork);
         
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                if (UDP.Poll(_socket, 1000) > 0)
-                {
-                    int dataLength = 0;
-                    while ((dataLength = UDP.Receive(_socket, ref address, buffer, buffer.Length)) > 0)
-                    {
-                        OnReceived(ref address, buffer, dataLength);
-                    }
-                }
+                var bytesRead = _socket.ReceiveFrom(buffer, SocketFlags.None, address);
+                OnReceived(address, buffer, bytesRead);
             }
             catch (Exception ex)
             {
@@ -84,44 +77,43 @@ public class ACUdpServer : CriticalBackgroundService
         }
     }
 
-    public void Send(Address address, byte[] buffer, int offset, int size)
+    public void Send(SocketAddress address, byte[] buffer, int offset, int size)
     {
-        if (UDP.Send(_socket, ref address, buffer, offset, size) < 0)
-        {
-            var ip = new StringBuilder(UDP.hostNameSize);
-            UDP.GetIP(ref address, ip, ip.Capacity);
-            Log.Error("Error sending UDP packet to {Address}", ip.ToString());
-        }
+        _socket.SendTo(buffer.AsSpan().Slice(offset, size), SocketFlags.None, address);
     }
-    
-    private void OnReceived(ref Address address, byte[] buffer, int size)
+
+    private void OnReceived(SocketAddress address, byte[] buffer, int size)
     {
+        // moved to separate method because it always allocated a closure
+        void HighPingKickAsync(EntryCar car)
+        {
+            _ = Task.Run(() => _entryCarManager.KickAsync(car.Client, $"high ping ({car.Ping}ms)"));
+        }
+        
         try
         {
-            PacketReader packetReader = new PacketReader(null, buffer);
+            var packetReader = new PacketReader(null, buffer.AsMemory()[..size]);
 
-            ACServerProtocol packetId = (ACServerProtocol)packetReader.Read<byte>();
+            var packetId = (ACServerProtocol)packetReader.Read<byte>();
 
-            if (packetId == ACServerProtocol.CarDisconnect)
+            if (packetId == ACServerProtocol.CarConnect)
             {
                 int sessionId = packetReader.Read<byte>();
                 if (_entryCarManager.ConnectedCars.TryGetValue(sessionId, out EntryCar? car) && car.Client != null)
                 {
-                    if (car.Client.TryAssociateUdp(address))
+                    var clonedAddress = address.Clone();
+                    if (car.Client.TryAssociateUdp(clonedAddress))
                     {
-                        _endpointCars[address] = car;
+                        _endpointCars[clonedAddress] = car;
                         car.Client.Disconnecting += OnClientDisconnecting;
-
-                        byte[] response = new byte[1] { 0x4E };
-                        Send(address, response, 0, 1);
+                        
+                        Send(address, CarConnectResponse, 0, CarConnectResponse.Length);
                     }
                 }
             }
             else if (packetId == ACServerProtocol.LobbyCheck)
             {
-                ushort httpPort = (ushort)_configuration.Server.HttpPort;
-                MemoryMarshal.Write(buffer.AsSpan().Slice(1), ref httpPort);
-                Send(address, buffer, 0, 3);
+                Send(address, _lobbyCheckResponse, 0, _lobbyCheckResponse.Length);
             }
             /*else if (packetId == 0xFF)
             {
@@ -136,17 +128,26 @@ public class ACUdpServer : CriticalBackgroundService
                     Server.Steam.HandleIncomingPacket(data, remoteEp);
                 }
             }*/
-            else if (_endpointCars.TryGetValue(address, out EntryCar? car) && car.Client != null)
+            else if (_endpointCars.TryGetValue(address, out var car))
             {
+                var client = car.Client;
+                if (client == null) return;
+                
                 if (packetId == ACServerProtocol.SessionRequest)
                 {
                     if (_sessionManager.CurrentSession.Configuration.Type != packetReader.Read<SessionType>())
-                        _sessionManager.SendCurrentSession(car.Client);
+                        _sessionManager.SendCurrentSession(client);
                 }
                 else if (packetId == ACServerProtocol.PositionUpdate)
                 {
-                    if (!car.Client.HasSentFirstUpdate)
-                        car.Client.SendFirstUpdate();
+                    if (!client.HasReceivedFirstPositionUpdate)
+                        client.ReceivedFirstPositionUpdate();
+
+                    if (!client.HasPassedChecksum
+                        || client.SecurityLevel < _configuration.Extra.MandatoryClientSecurityLevel) return;
+
+                    if (!client.HasSentFirstUpdate)
+                        client.SendFirstUpdate();
 
                     car.UpdatePosition(packetReader.Read<PositionUpdateIn>());
                 }
@@ -161,9 +162,17 @@ public class ACUdpServer : CriticalBackgroundService
                     {
                         car.HighPingSeconds++;
                         if (car.HighPingSeconds > _configuration.Extra.MaxPingSeconds)
-                            _ = Task.Run(() => _entryCarManager.KickAsync(car.Client, $"high ping ({car.Ping}ms)"));
+                            HighPingKickAsync(car);
                     }
                     else car.HighPingSeconds = 0;
+                }
+                else if (_configuration.Extra.EnableUdpClientMessages && packetId == ACServerProtocol.Extended)
+                {
+                    var extendedId = packetReader.Read<CSPMessageTypeUdp>();
+                    if (extendedId == CSPMessageTypeUdp.ClientMessage)
+                    {
+                        _clientMessageHandler.OnCSPClientMessageUdp(client, packetReader);
+                    }
                 }
             }
         }
@@ -175,9 +184,9 @@ public class ACUdpServer : CriticalBackgroundService
 
     private void OnClientDisconnecting(ACTcpClient sender, EventArgs args)
     {
-        if (sender.UdpEndpoint.HasValue)
+        if (sender.UdpEndpoint != null)
         {
-            _endpointCars.TryRemove(sender.UdpEndpoint.Value, out _);
+            _endpointCars.TryRemove(sender.UdpEndpoint, out _);
         }
     }
 }

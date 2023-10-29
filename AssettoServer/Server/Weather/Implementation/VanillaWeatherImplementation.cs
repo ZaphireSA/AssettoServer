@@ -1,5 +1,6 @@
-﻿using AssettoServer.Network.Packets.Outgoing;
-using AssettoServer.Network.Tcp;
+﻿using AssettoServer.Network.Tcp;
+using AssettoServer.Shared.Network.Packets.Outgoing;
+using AssettoServer.Shared.Weather;
 using NodaTime;
 
 namespace AssettoServer.Server.Weather.Implementation;

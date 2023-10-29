@@ -2,9 +2,11 @@
 using System.Collections.Generic;
 using System.Drawing;
 using System.Numerics;
-using AssettoServer.Network.Packets.Outgoing;
+using AssettoServer.Server.Ai.Splines;
 using AssettoServer.Server.Configuration;
 using AssettoServer.Server.Weather;
+using AssettoServer.Shared.Model;
+using AssettoServer.Shared.Network.Packets.Outgoing;
 using AssettoServer.Utils;
 using JPBotelho;
 using Serilog;
@@ -14,40 +16,21 @@ namespace AssettoServer.Server.Ai;
 public class AiState
 {
     public CarStatus Status { get; } = new();
-    public EntryCar EntryCar { get; }
     public bool Initialized { get; private set; }
 
-    public TrafficSplinePoint CurrentSplinePoint
+    public int CurrentSplinePointId
     {
-        get => _currentSplinePoint!;
+        get => _currentSplinePointId;
         private set
         {
-            lock (value.SlowestAiStateLock)
-            {
-                if (value.SlowestAiState == null || value.SlowestAiState.CurrentSpeed > CurrentSpeed)
-                {
-                    value.SlowestAiState = this;
-                }
-            }
-
-            if (_currentSplinePoint != null)
-            {
-                lock (_currentSplinePoint.SlowestAiStateLock)
-                {
-                    if (_currentSplinePoint?.SlowestAiState == this)
-                    {
-                        _currentSplinePoint.SlowestAiState = null;
-                    }
-                }
-            }
-
-            _currentSplinePoint = value;
+            _spline.SlowestAiStates.Enter(value, this);
+            _spline.SlowestAiStates.Leave(_currentSplinePointId, this);
+            _currentSplinePointId = value;
         }
     }
 
-    private TrafficSplinePoint? _currentSplinePoint;
-
-    public TrafficMapView MapView { get; private set; }
+    private int _currentSplinePointId;
+    
     public long SpawnProtectionEnds { get; set; }
     public float SafetyDistanceSquared { get; set; } = 20 * 20;
     public float Acceleration { get; set; }
@@ -58,6 +41,7 @@ public class AiState
     public Color Color { get; private set; }
     public byte SpawnCounter { get; private set; }
     public float ClosestAiObstacleDistance { get; private set; }
+    public EntryCar EntryCar { get; }
 
     private const float WalkingSpeed = 10 / 3.6f;
 
@@ -74,7 +58,7 @@ public class AiState
     private long _obstacleHonkStart;
     private long _obstacleHonkEnd;
     private CarStatusFlags _indicator = 0;
-    private TrafficSplineJunction? _nextJunction;
+    private int _nextJunctionId;
     private bool _junctionPassed;
     private float _endIndicatorDistance;
     private float _minObstacleDistance;
@@ -83,6 +67,8 @@ public class AiState
     private readonly SessionManager _sessionManager;
     private readonly EntryCarManager _entryCarManager;
     private readonly WeatherManager _weatherManager;
+    private readonly AiSpline _spline;
+    private readonly JunctionEvaluator _junctionEvaluator;
 
     private static readonly List<Color> CarColors = new()
     {
@@ -106,14 +92,15 @@ public class AiState
         Color.FromArgb(18, 46, 43),
     };
 
-    public AiState(EntryCar entryCar, SessionManager sessionManager, WeatherManager weatherManager, ACServerConfiguration configuration, EntryCarManager entryCarManager)
+    public AiState(EntryCar entryCar, SessionManager sessionManager, WeatherManager weatherManager, ACServerConfiguration configuration, EntryCarManager entryCarManager, AiSpline spline)
     {
         EntryCar = entryCar;
         _sessionManager = sessionManager;
         _weatherManager = weatherManager;
         _configuration = configuration;
         _entryCarManager = entryCarManager;
-        MapView = new TrafficMapView();
+        _spline = spline;
+        _junctionEvaluator = new JunctionEvaluator(spline);
 
         _lastTick = _sessionManager.ServerTimeMilliseconds;
     }
@@ -121,15 +108,7 @@ public class AiState
     public void Despawn()
     {
         Initialized = false;
-        if (_currentSplinePoint == null) return;
-        
-        lock (_currentSplinePoint.SlowestAiStateLock)
-        {
-            if (_currentSplinePoint.SlowestAiState == this)
-            {
-                _currentSplinePoint.SlowestAiState = null;
-            }
-        }
+        _spline.SlowestAiStates.Leave(CurrentSplinePointId, this);
     }
 
     private void SetRandomSpeed()
@@ -137,7 +116,7 @@ public class AiState
         float variation = _configuration.Extra.AiParams.MaxSpeedMs * _configuration.Extra.AiParams.MaxSpeedVariationPercent;
 
         float fastLaneOffset = 0;
-        if (CurrentSplinePoint.Left != null)
+        if (_spline.Points[CurrentSplinePointId].LeftId >= 0)
         {
             fastLaneOffset = _configuration.Extra.AiParams.RightLaneOffsetMs;
         }
@@ -152,29 +131,42 @@ public class AiState
         Color = CarColors[Random.Shared.Next(CarColors.Count)];
     }
 
-    public void Teleport(TrafficSplinePoint point)
+    public void Teleport(int pointId)
     {
-        MapView.Clear();
-        CurrentSplinePoint = point;
-        if (!MapView.TryNext(CurrentSplinePoint, out var nextPoint))
-            throw new InvalidOperationException($"Cannot get next spline point for {CurrentSplinePoint.Id}");
-        _currentVecLength = (nextPoint.Position - CurrentSplinePoint.Position).Length();
+        _junctionEvaluator.Clear();
+        CurrentSplinePointId = pointId;
+        if (!_junctionEvaluator.TryNext(CurrentSplinePointId, out var nextPointId))
+            throw new InvalidOperationException($"Cannot get next spline point for {CurrentSplinePointId}");
+        _currentVecLength = (_spline.Points[nextPointId].Position - _spline.Points[CurrentSplinePointId].Position).Length();
         _currentVecProgress = 0;
             
         CalculateTangents();
-            
+        
         SetRandomSpeed();
         SetRandomColor();
-            
-        SpawnProtectionEnds = _sessionManager.ServerTimeMilliseconds + Random.Shared.Next(_configuration.Extra.AiParams.MinSpawnProtectionTimeMilliseconds, _configuration.Extra.AiParams.MaxSpawnProtectionTimeMilliseconds);
-        SafetyDistanceSquared = Random.Shared.Next((int)Math.Round(_configuration.Extra.AiParams.MinAiSafetyDistanceSquared * (1.0f / _configuration.Extra.AiParams.TrafficDensity)),
-            (int)Math.Round(_configuration.Extra.AiParams.MaxAiSafetyDistanceSquared * (1.0f / _configuration.Extra.AiParams.TrafficDensity)));
+
+        var minDist = _configuration.Extra.AiParams.MinAiSafetyDistanceSquared;
+        var maxDist = _configuration.Extra.AiParams.MaxAiSafetyDistanceSquared;
+        if (_configuration.Extra.AiParams.LaneCountSpecificOverrides.TryGetValue(_spline.GetLanes(CurrentSplinePointId).Length, out var overrides))
+        {
+            minDist = overrides.MinAiSafetyDistanceSquared;
+            maxDist = overrides.MaxAiSafetyDistanceSquared;
+        }
+        
+        if (EntryCar.MinAiSafetyDistanceMetersSquared.HasValue)
+            minDist = EntryCar.MinAiSafetyDistanceMetersSquared.Value;
+        if (EntryCar.MaxAiSafetyDistanceMetersSquared.HasValue)
+            maxDist = EntryCar.MaxAiSafetyDistanceMetersSquared.Value;
+
+        SpawnProtectionEnds = _sessionManager.ServerTimeMilliseconds + Random.Shared.Next(EntryCar.AiMinSpawnProtectionTimeMilliseconds, EntryCar.AiMaxSpawnProtectionTimeMilliseconds);
+        SafetyDistanceSquared = Random.Shared.Next((int)Math.Round(minDist * (1.0f / _configuration.Extra.AiParams.TrafficDensity)),
+            (int)Math.Round(maxDist * (1.0f / _configuration.Extra.AiParams.TrafficDensity)));
         _stoppedForCollisionUntil = 0;
         _ignoreObstaclesUntil = 0;
         _obstacleHonkEnd = 0;
         _obstacleHonkStart = 0;
         _indicator = 0;
-        _nextJunction = null;
+        _nextJunctionId = -1;
         _junctionPassed = false;
         _endIndicatorDistance = 0;
         _lastTick = _sessionManager.ServerTimeMilliseconds;
@@ -186,43 +178,48 @@ public class AiState
 
     private void CalculateTangents()
     {
-        if (!MapView.TryNext(CurrentSplinePoint, out var nextPoint))
+        if (!_junctionEvaluator.TryNext(CurrentSplinePointId, out var nextPointId))
             throw new InvalidOperationException("Cannot get next spline point");
-            
-        if (MapView.TryPrevious(CurrentSplinePoint, out var previousPoint))
+
+        var points = _spline.Points;
+        
+        if (_junctionEvaluator.TryPrevious(CurrentSplinePointId, out var previousPointId))
         {
-            _startTangent = (nextPoint.Position - previousPoint.Position) * 0.5f;
+            _startTangent = (points[nextPointId].Position - points[previousPointId].Position) * 0.5f;
         }
         else
         {
-            _startTangent = (nextPoint.Position - CurrentSplinePoint.Position) * 0.5f;
+            _startTangent = (points[nextPointId].Position - points[CurrentSplinePointId].Position) * 0.5f;
         }
 
-        if (MapView.TryNext(CurrentSplinePoint, out var nextNextPoint, 2))
+        if (_junctionEvaluator.TryNext(CurrentSplinePointId, out var nextNextPointId, 2))
         {
-            _endTangent = (nextNextPoint.Position - CurrentSplinePoint.Position) * 0.5f;
+            _endTangent = (points[nextNextPointId].Position - points[CurrentSplinePointId].Position) * 0.5f;
         }
         else
         {
-            _endTangent = (nextPoint.Position - CurrentSplinePoint.Position) * 0.5f;
+            _endTangent = (points[nextPointId].Position - points[CurrentSplinePointId].Position) * 0.5f;
         }
     }
 
     private bool Move(float progress)
     {
+        var points = _spline.Points;
+        var junctions = _spline.Junctions;
+        
         bool recalculateTangents = false;
         while (progress > _currentVecLength)
         {
             progress -= _currentVecLength;
                 
-            if (!MapView.TryNext(CurrentSplinePoint, out var nextPoint)
-                || !MapView.TryNext(nextPoint, out var nextNextPoint))
+            if (!_junctionEvaluator.TryNext(CurrentSplinePointId, out var nextPointId)
+                || !_junctionEvaluator.TryNext(nextPointId, out var nextNextPointId))
             {
                 return false;
             }
 
-            CurrentSplinePoint = nextPoint;
-            _currentVecLength = (nextNextPoint.Position - CurrentSplinePoint.Position).Length();
+            CurrentSplinePointId = nextPointId;
+            _currentVecLength = (points[nextNextPointId].Position - points[CurrentSplinePointId].Position).Length();
             recalculateTangents = true;
 
             if (_junctionPassed)
@@ -237,11 +234,11 @@ public class AiState
                 }
             }
                 
-            if (_nextJunction != null && CurrentSplinePoint.JunctionEnd == _nextJunction)
+            if (_nextJunctionId >= 0 && points[CurrentSplinePointId].JunctionEndId == _nextJunctionId)
             {
                 _junctionPassed = true;
-                _endIndicatorDistance = _nextJunction.IndicateDistancePost;
-                _nextJunction = null;
+                _endIndicatorDistance = junctions[_nextJunctionId].IndicateDistancePost;
+                _nextJunctionId = -1;
             }
         }
 
@@ -255,56 +252,118 @@ public class AiState
         return true;
     }
 
-    public bool CanSpawn(Vector3 spawnPoint)
+    public bool CanSpawn(int spawnPointId, AiState? previousAi, AiState? nextAi)
     {
-        return EntryCar.CanSpawnAiState(spawnPoint, this);
+        var ops = _spline.Operations;
+        ref readonly var spawnPoint = ref ops.Points[spawnPointId];
+
+        if (!IsAllowedLaneCount(spawnPointId))
+            return false;
+        if (!IsAllowedLane(in spawnPoint))
+            return false;
+        if (!IsKeepingSafetyDistances(in spawnPoint, previousAi, nextAi))
+            return false;
+
+        return EntryCar.CanSpawnAiState(spawnPoint.Position, this);
+    }
+
+    private bool IsKeepingSafetyDistances(in SplinePoint spawnPoint, AiState? previousAi, AiState? nextAi)
+    {
+        if (previousAi != null)
+        {
+            var distance = MathF.Max(0, Vector3.Distance(spawnPoint.Position, previousAi.Status.Position)
+                           - previousAi.EntryCar.VehicleLengthPreMeters
+                           - EntryCar.VehicleLengthPostMeters);
+
+            var distanceSquared = distance * distance;
+            if (distanceSquared < previousAi.SafetyDistanceSquared || distanceSquared < SafetyDistanceSquared)
+                return false;
+        }
+        
+        if (nextAi != null)
+        {
+            var distance = MathF.Max(0, Vector3.Distance(spawnPoint.Position, nextAi.Status.Position)
+                                        - nextAi.EntryCar.VehicleLengthPostMeters
+                                        - EntryCar.VehicleLengthPreMeters);
+
+            var distanceSquared = distance * distance;
+            if (distanceSquared < nextAi.SafetyDistanceSquared || distanceSquared < SafetyDistanceSquared)
+                return false;
+        }
+
+        return true;
+    }
+
+    private bool IsAllowedLaneCount(int spawnPointId)
+    {
+        var laneCount = _spline.GetLanes(spawnPointId).Length;
+        if (EntryCar.MinLaneCount.HasValue && laneCount < EntryCar.MinLaneCount.Value)
+            return false;
+        if (EntryCar.MaxLaneCount.HasValue && laneCount > EntryCar.MaxLaneCount.Value)
+            return false;
+        
+        return true;
+    }
+
+    private bool IsAllowedLane(in SplinePoint spawnPoint)
+    {
+        var isAllowedLane = true;
+        if (EntryCar.AiAllowedLanes != null)
+        {
+            isAllowedLane = (EntryCar.AiAllowedLanes.Contains(LaneSpawnBehavior.Middle) && spawnPoint.LeftId >= 0 && spawnPoint.RightId >= 0)
+                            || (EntryCar.AiAllowedLanes.Contains(LaneSpawnBehavior.Left) && spawnPoint.LeftId < 0)
+                            || (EntryCar.AiAllowedLanes.Contains(LaneSpawnBehavior.Right) && spawnPoint.RightId < 0);
+        }
+
+        return isAllowedLane;
     }
 
     private (AiState? ClosestAiState, float ClosestAiStateDistance, float MaxSpeed) SplineLookahead()
     {
+        var points = _spline.Points;
+        var junctions = _spline.Junctions;
+        
         float maxBrakingDistance = PhysicsUtils.CalculateBrakingDistance(CurrentSpeed, EntryCar.AiDeceleration) * 2 + 20;
         AiState? closestAiState = null;
         float closestAiStateDistance = float.MaxValue;
         bool junctionFound = false;
         float distanceTravelled = 0;
-        var point = CurrentSplinePoint ?? throw new InvalidOperationException("CurrentSplinePoint is null");
+        var pointId = CurrentSplinePointId;
+        ref readonly var point = ref points[pointId]; 
         float maxSpeed = float.MaxValue;
         float currentSpeedSquared = CurrentSpeed * CurrentSpeed;
         while (distanceTravelled < maxBrakingDistance)
         {
             distanceTravelled += point.Length;
-            point = MapView.Next(point);
-            if (point == null)
+            pointId = _junctionEvaluator.Next(pointId);
+            if (pointId < 0)
                 break;
 
-            if (!junctionFound && point.JunctionStart != null && distanceTravelled < point.JunctionStart.IndicateDistancePre)
+            point = ref points[pointId];
+
+            if (!junctionFound && point.JunctionStartId >= 0 && distanceTravelled < junctions[point.JunctionStartId].IndicateDistancePre)
             {
-                var indicator = MapView.WillTakeJunction(point.JunctionStart) ? point.JunctionStart.IndicateWhenTaken : point.JunctionStart.IndicateWhenNotTaken;
+                ref readonly var jct = ref junctions[point.JunctionStartId];
+                
+                var indicator = _junctionEvaluator.WillTakeJunction(point.JunctionStartId) ? jct.IndicateWhenTaken : jct.IndicateWhenNotTaken;
                 if (indicator != 0)
                 {
                     _indicator = indicator;
-                    _nextJunction = point.JunctionStart;
+                    _nextJunctionId = point.JunctionStartId;
                     junctionFound = true;
                 }
             }
 
-            if (closestAiState == null && point.SlowestAiState != null)
+            if (closestAiState == null)
             {
-                lock (point.SlowestAiStateLock)
+                var slowest = _spline.SlowestAiStates[pointId];
+
+                if (slowest != null)
                 {
-                    if (point.SlowestAiState != null)
-                    {
-                        if (point.SlowestAiState.CurrentSplinePoint != point)
-                        {
-                            Log.Debug("Found invalid slowest AI state");
-                            point.SlowestAiState = null;
-                        }
-                        else
-                        {
-                            closestAiState = point.SlowestAiState;
-                            closestAiStateDistance = Vector3.Distance(Status.Position, closestAiState.Status.Position);
-                        }
-                    }
+                    closestAiState = slowest;
+                    closestAiStateDistance = MathF.Max(0, Vector3.Distance(Status.Position, closestAiState.Status.Position)
+                                                          - EntryCar.VehicleLengthPreMeters
+                                                          - closestAiState.EntryCar.VehicleLengthPostMeters);
                 }
             }
 
@@ -326,28 +385,47 @@ public class AiState
         return (closestAiState, closestAiStateDistance, maxSpeed);
     }
 
-    private (EntryCar? entryCar, float distance) FindClosestPlayerObstacle()
+    private bool ShouldIgnorePlayerObstacles()
     {
-        EntryCar? closestCar = null;
-        float minDistance = float.MaxValue;
-        for (var i = 0; i < _entryCarManager.EntryCars.Length; i++)
+        if (_configuration.Extra.AiParams.IgnorePlayerObstacleSpheres != null)
         {
-            var playerCar = _entryCarManager.EntryCars[i];
-            if (playerCar.Client?.HasSentFirstUpdate == true)
+            foreach (var sphere in _configuration.Extra.AiParams.IgnorePlayerObstacleSpheres)
             {
-                float distance = Vector3.DistanceSquared(playerCar.Status.Position, Status.Position);
-
-                if (distance < minDistance && GetAngleToCar(playerCar.Status) is > 166 and < 194)
+                if (Vector3.DistanceSquared(Status.Position, sphere.Center) < sphere.RadiusMeters * sphere.RadiusMeters)
                 {
-                    minDistance = distance;
-                    closestCar = playerCar;
+                    return true;
                 }
             }
         }
 
-        if (closestCar != null)
+        return false;
+    }
+
+    private (EntryCar? entryCar, float distance) FindClosestPlayerObstacle()
+    {
+        if (!ShouldIgnorePlayerObstacles())
         {
-            return (closestCar, MathF.Sqrt(minDistance));
+            EntryCar? closestCar = null;
+            float minDistance = float.MaxValue;
+            for (var i = 0; i < _entryCarManager.EntryCars.Length; i++)
+            {
+                var playerCar = _entryCarManager.EntryCars[i];
+                if (playerCar.Client?.HasSentFirstUpdate == true)
+                {
+                    float distance = Vector3.DistanceSquared(playerCar.Status.Position, Status.Position);
+
+                    if (distance < minDistance && GetAngleToCar(playerCar.Status) is > 166 and < 194)
+                    {
+                        minDistance = distance;
+                        closestCar = playerCar;
+                    }
+                }
+            }
+
+            if (closestCar != null)
+            {
+                return (closestCar, MathF.Sqrt(minDistance));
+            }
         }
 
         return (null, float.MaxValue);
@@ -375,13 +453,13 @@ public class AiState
         Vector3 targetRearLeft = Vector3.Transform(new Vector3(halfObstanceRectLength, 0, halfObstacleRectWidth), targetWorldViewMatrix);
         Vector3 targetRearRight = Vector3.Transform(new Vector3(halfObstanceRectLength, 0, -halfObstacleRectWidth), targetWorldViewMatrix);
 
-        static bool isPointInside(Vector3 point, float width, float length, float offset)
+        static bool IsPointInside(Vector3 point, float width, float length, float offset)
             => MathF.Abs(point.X) >= width || (-point.Z >= offset && -point.Z <= offset + length);
 
-        bool isObstacle = isPointInside(targetFrontLeft, halfAiRectWidth, aiRectLength, aiRectOffset)
-                          || isPointInside(targetFrontRight, halfAiRectWidth, aiRectLength, aiRectOffset)
-                          || isPointInside(targetRearLeft, halfAiRectWidth, aiRectLength, aiRectOffset)
-                          || isPointInside(targetRearRight, halfAiRectWidth, aiRectLength, aiRectOffset);
+        bool isObstacle = IsPointInside(targetFrontLeft, halfAiRectWidth, aiRectLength, aiRectOffset)
+                          || IsPointInside(targetFrontRight, halfAiRectWidth, aiRectLength, aiRectOffset)
+                          || IsPointInside(targetRearLeft, halfAiRectWidth, aiRectLength, aiRectOffset)
+                          || IsPointInside(targetRearRight, halfAiRectWidth, aiRectLength, aiRectOffset);
 
         return isObstacle;
     }
@@ -476,7 +554,10 @@ public class AiState
 
     public void StopForCollision()
     {
-        _stoppedForCollisionUntil = _sessionManager.ServerTimeMilliseconds + Random.Shared.Next(_configuration.Extra.AiParams.MinCollisionStopTimeMilliseconds, _configuration.Extra.AiParams.MaxCollisionStopTimeMilliseconds);
+        if (!ShouldIgnorePlayerObstacles())
+        {
+            _stoppedForCollisionUntil = _sessionManager.ServerTimeMilliseconds + Random.Shared.Next(EntryCar.AiMinCollisionStopTimeMilliseconds, EntryCar.AiMaxCollisionStopTimeMilliseconds);
+        }
     }
 
     public float GetAngleToCar(CarStatus car)
@@ -519,6 +600,8 @@ public class AiState
         if (!Initialized)
             return;
 
+        var ops = _spline.Operations;
+
         long currentTime = _sessionManager.ServerTimeMilliseconds;
         long dt = currentTime - _lastTick;
         _lastTick = currentTime;
@@ -535,24 +618,24 @@ public class AiState
         }
 
         float moveMeters = (dt / 1000.0f) * CurrentSpeed;
-        if (!Move(_currentVecProgress + moveMeters) || !MapView.TryNext(CurrentSplinePoint, out var nextPoint))
+        if (!Move(_currentVecProgress + moveMeters) || !_junctionEvaluator.TryNext(CurrentSplinePointId, out var nextPoint))
         {
             Log.Debug("Car {SessionId} reached spline end, despawning", EntryCar.SessionId);
             Despawn();
             return;
         }
 
-        CatmullRom.CatmullRomPoint smoothPos = CatmullRom.Evaluate(CurrentSplinePoint.Position, 
-            nextPoint.Position, 
+        CatmullRom.CatmullRomPoint smoothPos = CatmullRom.Evaluate(ops.Points[CurrentSplinePointId].Position, 
+            ops.Points[nextPoint].Position, 
             _startTangent, 
             _endTangent, 
             _currentVecProgress / _currentVecLength);
             
-        Vector3 rotation = new Vector3()
+        Vector3 rotation = new Vector3
         {
             X = MathF.Atan2(smoothPos.Tangent.Z, smoothPos.Tangent.X) - MathF.PI / 2,
             Y = (MathF.Atan2(new Vector2(smoothPos.Tangent.Z, smoothPos.Tangent.X).Length(), smoothPos.Tangent.Y) - MathF.PI / 2) * -1f,
-            Z = CurrentSplinePoint.GetCamber(_currentVecProgress / _currentVecLength)
+            Z = ops.GetCamber(CurrentSplinePointId, _currentVecProgress / _currentVecLength)
         };
 
         float tyreAngularSpeed = GetTyreAngularSpeed(CurrentSpeed, EntryCar.TyreDiameterMeters);

@@ -4,7 +4,7 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using AssettoServer.Server.Configuration;
-using AssettoServer.Utils;
+using AssettoServer.Shared.Services;
 using Microsoft.Extensions.Hosting;
 using Serilog;
 
@@ -23,11 +23,6 @@ public class RconServer : CriticalBackgroundService
     
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (_configuration.Server.AdminPassword?.Length < 8)
-        {
-            throw new ConfigurationException("ADMIN_PASSWORD must be at least 8 characters to enable RCON");
-        }
-        
         Log.Information("Starting RCON server on port {TcpPort}", _configuration.Extra.RconPort);
         var listener = new TcpListener(IPAddress.Any, _configuration.Extra.RconPort);
         listener.Start();

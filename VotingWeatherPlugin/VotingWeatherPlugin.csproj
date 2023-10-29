@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <TargetFramework>net6.0</TargetFramework>
+        <TargetFramework>net8.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <EnableDynamicLoading>true</EnableDynamicLoading>
@@ -14,6 +14,10 @@
     </PropertyGroup>
 
     <ItemGroup>
+      <ProjectReference Include="..\AssettoServer.Shared\AssettoServer.Shared.csproj">
+          <Private>false</Private>
+          <ExcludeAssets>runtime</ExcludeAssets>
+      </ProjectReference>
       <ProjectReference Include="..\AssettoServer\AssettoServer.csproj">
           <Private>false</Private>
           <ExcludeAssets>runtime</ExcludeAssets>

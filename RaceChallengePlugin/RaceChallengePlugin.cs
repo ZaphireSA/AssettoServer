@@ -1,6 +1,6 @@
 ﻿using AssettoServer.Server;
 using AssettoServer.Server.Plugin;
-using AssettoServer.Utils;
+using AssettoServer.Shared.Services;
 using Microsoft.Extensions.Hosting;
 
 namespace RaceChallengePlugin;

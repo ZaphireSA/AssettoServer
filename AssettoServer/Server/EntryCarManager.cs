@@ -3,14 +3,14 @@ using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using AssettoServer.Network.Packets.Incoming;
-using AssettoServer.Network.Packets.Outgoing;
-using AssettoServer.Network.Packets.Shared;
 using AssettoServer.Network.Tcp;
 using AssettoServer.Server.Admin;
 using AssettoServer.Server.Blacklist;
 using AssettoServer.Server.Configuration;
 using AssettoServer.Server.OpenSlotFilters;
+using AssettoServer.Shared.Network.Packets.Incoming;
+using AssettoServer.Shared.Network.Packets.Outgoing;
+using AssettoServer.Shared.Network.Packets.Shared;
 using Serilog;
 
 namespace AssettoServer.Server;
@@ -61,7 +61,7 @@ public class EntryCarManager
         if (client == null) return;
         
         string? clientReason = reason != null ? $"You have been kicked for {reason}" : null;
-        string broadcastReason = reason != null ? $"{client.Name} has been kicked for {reason}." : $"{client.Name} has been kicked.";
+        string broadcastReason = reason != null ? $"{client.Name} has been kicked from the server for {reason}." : $"{client.Name} has been kicked from the server.";
 
         await KickAsync(client, KickReason.Kicked, reason, clientReason, broadcastReason, admin);
     }
@@ -71,7 +71,7 @@ public class EntryCarManager
         if (client == null) return;
         
         string clientReason = reason != null ? $"You have been banned for {reason}" : "You have been banned from the server";
-        string broadcastReason = reason != null ? $"{client.Name} has been banned for {reason}." : $"{client.Name} has been banned.";
+        string broadcastReason = reason != null ? $"{client.Name} has been banned from the server for {reason}." : $"{client.Name} has been banned from the server.";
 
         await KickAsync(client, KickReason.VoteBlacklisted, reason, clientReason, broadcastReason, admin);
         await _blacklist.AddAsync(client.Guid);
@@ -148,9 +148,8 @@ public class EntryCarManager
 
     public void BroadcastPacket<TPacket>(TPacket packet, ACTcpClient? sender = null) where TPacket : IOutgoingNetworkPacket
     {
-        for (int i = 0; i < EntryCars.Length; i++)
+        foreach (var car in EntryCars)
         {
-            var car = EntryCars[i];
             if (car.Client is { HasSentFirstUpdate: true } && car.Client != sender)
             {
                 car.Client?.SendPacket(packet);
@@ -158,12 +157,13 @@ public class EntryCarManager
         }
     }
         
-    public void BroadcastPacketUdp<TPacket>(TPacket packet, ACTcpClient? sender = null) where TPacket : IOutgoingNetworkPacket
+    public void BroadcastPacketUdp<TPacket>(in TPacket packet, ACTcpClient? sender = null, float? range = null, bool skipSender = true) where TPacket : IOutgoingNetworkPacket
     {
-        for (int i = 0; i < EntryCars.Length; i++)
+        foreach (var car in EntryCars)
         {
-            var car = EntryCars[i];
-            if (car.Client is { HasSentFirstUpdate: true, HasAssociatedUdp: true } && car.Client != sender)
+            if (car.Client is { HasSentFirstUpdate: true, UdpEndpoint: not null } 
+                && (!skipSender || car.Client != sender)
+                && (!range.HasValue || (sender != null && sender.EntryCar.IsInRange(car, range.Value))))
             {
                 car.Client?.SendPacketUdp(in packet);
             }

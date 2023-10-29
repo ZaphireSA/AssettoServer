@@ -5,9 +5,9 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using AssettoServer.Commands;
-using AssettoServer.Network.Packets;
-using AssettoServer.Network.Packets.Outgoing;
 using AssettoServer.Server.Configuration;
+using AssettoServer.Shared.Network.Packets;
+using AssettoServer.Shared.Network.Packets.Outgoing;
 using Serilog;
 
 namespace AssettoServer.Network.Rcon;
@@ -85,13 +85,12 @@ public class RconClient
     private async Task ReceiveLoopAsync()
     {
         byte[] buffer = new byte[2046];
-        NetworkStream stream = _stream;
 
         try
         {
             while (!_disconnectTokenSource.IsCancellationRequested)
             {
-                PacketReader reader = new PacketReader(stream, buffer, true);
+                var reader = new PacketReader(_stream, buffer, true);
                 reader.SliceBuffer(await reader.ReadPacketAsync());
 
                 if (reader.Buffer.Length == 0)

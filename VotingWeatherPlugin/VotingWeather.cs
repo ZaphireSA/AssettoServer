@@ -1,9 +1,10 @@
-﻿using AssettoServer.Network.Packets.Shared;
-using AssettoServer.Network.Tcp;
+﻿using AssettoServer.Network.Tcp;
 using AssettoServer.Server;
 using AssettoServer.Server.Plugin;
 using AssettoServer.Server.Weather;
-using AssettoServer.Utils;
+using AssettoServer.Shared.Network.Packets.Shared;
+using AssettoServer.Shared.Services;
+using AssettoServer.Shared.Weather;
 using Microsoft.Extensions.Hosting;
 using Serilog;
 
@@ -70,7 +71,7 @@ public class VotingWeather : CriticalBackgroundService, IAssettoServerAutostart
             return;
         }
 
-        if (choice >= _configuration.NumChoices || choice < 0)
+        if (choice >= _availableWeathers.Count || choice < 0)
         {
             client.SendPacket(new ChatMessage { SessionId = 255, Message = "Invalid choice." });
             return;
@@ -102,6 +103,8 @@ public class VotingWeather : CriticalBackgroundService, IAssettoServerAutostart
         _entryCarManager.BroadcastPacket(new ChatMessage { SessionId = 255, Message = "Vote for next weather:" });
         for (int i = 0; i < _configuration.NumChoices; i++)
         {
+            if (weathersLeft.Count < 1) break;
+            
             var nextWeather = weathersLeft[Random.Shared.Next(weathersLeft.Count)];
             _availableWeathers.Add(new WeatherChoice { Weather = nextWeather, Votes = 0 });
             weathersLeft.Remove(nextWeather);
@@ -128,7 +131,7 @@ public class VotingWeather : CriticalBackgroundService, IAssettoServerAutostart
             TemperatureRoad = (float)WeatherUtils.GetRoadTemperature(_weatherManager.CurrentDateTime.TimeOfDay.TickOfDay / 10_000_000.0, last.TemperatureAmbient,
                 winnerType.TemperatureCoefficient),
             Pressure = last.Pressure,
-            Humidity = (int)(winnerType.Humidity * 100),
+            Humidity = winnerType.Humidity,
             WindSpeed = last.WindSpeed,
             WindDirection = last.WindDirection,
             RainIntensity = last.RainIntensity,

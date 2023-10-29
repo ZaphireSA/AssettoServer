@@ -10,8 +10,8 @@ namespace AssettoServer.Server;
 
 public class ChecksumManager
 {
-    internal IReadOnlyDictionary<string, byte[]> TrackChecksums { get; private set; } = null!;
-    internal IReadOnlyDictionary<string, List<byte[]>> CarChecksums { get; private set; } = null!;
+    public IReadOnlyDictionary<string, byte[]> TrackChecksums { get; private set; } = null!;
+    public IReadOnlyDictionary<string, List<byte[]>> CarChecksums { get; private set; } = null!;
 
     private readonly ACServerConfiguration _configuration;
     private readonly EntryCarManager _entryCarManager;
@@ -42,7 +42,10 @@ public class ChecksumManager
             }
             else
             {
-                throw new ConfigurationException($"No data.acd found for {models}. This will allow players to cheat using modified data. More info: https://assettoserver.org/docs/common-configuration-errors#missing-car-checksums");
+                throw new ConfigurationException($"No data.acd found for {models}. This will allow players to cheat using modified data. More info: https://assettoserver.org/docs/common-configuration-errors#missing-car-checksums")
+                {
+                    HelpLink = "https://assettoserver.org/docs/common-configuration-errors#missing-car-checksums"
+                };
             }
         }
     }

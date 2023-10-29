@@ -43,7 +43,7 @@ using System.Threading.Tasks;
 using AssettoServer.Network.Tcp;
 using AssettoServer.Server.Blacklist;
 using AssettoServer.Server.Configuration;
-using AssettoServer.Utils;
+using AssettoServer.Shared.Services;
 using Microsoft.Extensions.Hosting;
 using Serilog;
 using Steamworks;
@@ -55,6 +55,9 @@ public class Steam : CriticalBackgroundService
     private readonly ACServerConfiguration _configuration;
     private readonly IBlacklistService _blacklistService;
     private readonly CSPFeatureManager _cspFeatureManager;
+
+    private bool _firstRun = true;
+    
     public Steam(ACServerConfiguration configuration, IBlacklistService blacklistService, CSPFeatureManager cspFeatureManager, IHostApplicationLifetime applicationLifetime) : base(applicationLifetime)
     {
         _configuration = configuration;
@@ -88,8 +91,11 @@ public class Steam : CriticalBackgroundService
         }
         catch (Exception ex)
         {
-            Log.Fatal(ex, "Error trying to initialize SteamServer");
+            if (_firstRun) throw;
+            Log.Error(ex, "Error trying to initialize SteamServer");
         }
+
+        _firstRun = false;
     }
 
     internal void HandleIncomingPacket(byte[] data, IPEndPoint endpoint)
@@ -110,7 +116,7 @@ public class Steam : CriticalBackgroundService
             return false;
 
         TaskCompletionSource<bool> taskCompletionSource = new TaskCompletionSource<bool>();
-        void ticketValidateResponse(SteamId playerSteamId, SteamId ownerSteamId, AuthResponse authResponse)
+        void TicketValidateResponse(SteamId playerSteamId, SteamId ownerSteamId, AuthResponse authResponse)
         {
             if (playerSteamId != guid)
                 return;
@@ -143,33 +149,27 @@ public class Steam : CriticalBackgroundService
                     taskCompletionSource.SetResult(false);
                     return;
                 }
-                else
+
+                client.Logger.Information("{ClientName} ({SteamId}) is using Steam family sharing, owner {OwnerSteamId}", client.Name, playerSteamId, ownerSteamId);
+            }
+
+            foreach (int appid in _configuration.Extra.ValidateDlcOwnership)
+            {
+                if (SteamServer.UserHasLicenseForApp(playerSteamId, appid) != UserHasLicenseForAppResult.HasLicense)
                 {
-                    client.Logger.Information("{ClientName} ({SteamId}) is using Steam family sharing, owner {OwnerSteamId}", client.Name, playerSteamId, ownerSteamId);
+                    client.Logger.Information("{ClientName} does not own required DLC {DlcId}", client.Name, appid);
+                    taskCompletionSource.SetResult(false);
+                    return;
                 }
             }
 
-            if (_configuration.Extra.ValidateDlcOwnership != null)
-            {
-                foreach (int appid in _configuration.Extra.ValidateDlcOwnership)
-                {
-                    if (SteamServer.UserHasLicenseForApp(playerSteamId, appid) != UserHasLicenseForAppResult.HasLicense)
-                    {
-                        client.Logger.Information("{ClientName} does not own required DLC {DlcId}", client.Name, appid);
-                        taskCompletionSource.SetResult(false);
-                        return;
-                    }
-                }
-            }
-            
             client.Logger.Information("Steam auth ticket verification succeeded for {ClientName}", client.Name);
             taskCompletionSource.SetResult(true);
         }
 
         bool validated = false;
 
-        SteamServer.OnValidateAuthTicketResponse += ticketValidateResponse;
-        Task timeoutTask = Task.Delay(10000);
+        SteamServer.OnValidateAuthTicketResponse += TicketValidateResponse;
 
         if (!SteamServer.BeginAuthSession(sessionTicket, guid))
         {
@@ -177,18 +177,19 @@ public class Steam : CriticalBackgroundService
             taskCompletionSource.SetResult(false);
         }
 
-        Task finishedTask = await Task.WhenAny(timeoutTask, taskCompletionSource.Task);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        cts.Token.Register(() => taskCompletionSource.SetCanceled(cts.Token));
 
-        if (finishedTask == timeoutTask)
-        {
-            client.Logger.Warning("Steam auth ticket verification timed out for {ClientName}", client.Name);
-        }
-        else
+        try
         {
             validated = await taskCompletionSource.Task;
         }
+        catch (TaskCanceledException)
+        {
+            client.Logger.Warning("Steam auth ticket verification timed out for {ClientName}", client.Name);
+        }
 
-        SteamServer.OnValidateAuthTicketResponse -= ticketValidateResponse;
+        SteamServer.OnValidateAuthTicketResponse -= TicketValidateResponse;
         return validated;
     }
 

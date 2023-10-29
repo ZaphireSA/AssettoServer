@@ -22,7 +22,7 @@ public class IniTrackParamsProvider : ITrackParamsProvider
         _httpClient.Timeout = TimeSpan.FromSeconds(10);
     }
 
-    public async Task Initialize()
+    public async Task InitializeAsync()
     {
         if (!File.Exists(TrackParamsPath))
         {
@@ -61,7 +61,7 @@ public class IniTrackParamsProvider : ITrackParamsProvider
 
         if (data.Sections.ContainsSection(cleanTrack))
         {
-            return new TrackParams()
+            return new TrackParams
             {
                 Latitude = double.Parse(data[cleanTrack]["LATITUDE"]),
                 Longitude = double.Parse(data[cleanTrack]["LONGITUDE"]),

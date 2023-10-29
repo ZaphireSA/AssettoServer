@@ -1,10 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Numerics;
 using System.Threading;
-using AssettoServer.Network.Packets.Outgoing;
 using AssettoServer.Server.Ai;
+using AssettoServer.Server.Ai.Splines;
 using AssettoServer.Server.Configuration;
+using AssettoServer.Shared.Model;
+using AssettoServer.Shared.Network.Packets.Outgoing;
 
 namespace AssettoServer.Server;
 
@@ -33,22 +36,35 @@ public partial class EntryCar
     public float AiCorneringBrakeDistanceFactor { get; set; }
     public float AiCorneringBrakeForceFactor { get; set; }
     public float AiSplineHeightOffsetMeters { get; set; } = 0;
+    public int? AiMaxOverbooking { get; set; }
+    public int AiMinSpawnProtectionTimeMilliseconds { get; set; }
+    public int AiMaxSpawnProtectionTimeMilliseconds { get; set; }
+    public int? MinLaneCount { get; set; }
+    public int? MaxLaneCount { get; set; }
+    public int AiMinCollisionStopTimeMilliseconds { get; set; }
+    public int AiMaxCollisionStopTimeMilliseconds { get; set; }
+    public float VehicleLengthPreMeters { get; set; }
+    public float VehicleLengthPostMeters { get; set; }
+    public int? MinAiSafetyDistanceMetersSquared { get; set; }
+    public int? MaxAiSafetyDistanceMetersSquared { get; set; }
+    public List<LaneSpawnBehavior>? AiAllowedLanes { get; set; }
     public float TyreDiameterMeters { get; set; }
     private readonly List<AiState> _aiStates = new List<AiState>();
     private readonly ReaderWriterLockSlim _aiStatesLock = new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion);
     
     private readonly Func<EntryCar, AiState> _aiStateFactory;
+    private readonly AiSpline? _spline;
 
     private void AiInit()
     {
         AiName = $"{_configuration.Extra.AiParams.NamePrefix} {SessionId}";
         SetAiOverbooking(0);
 
-        _configuration.Reload += OnConfigReload;
-        OnConfigReload(_configuration, EventArgs.Empty);
+        _configuration.Extra.AiParams.PropertyChanged += OnConfigReload;
+        OnConfigReload(_configuration, new PropertyChangedEventArgs(string.Empty));
     }
 
-    private void OnConfigReload(ACServerConfiguration sender, EventArgs _)
+    private void OnConfigReload(object? sender, PropertyChangedEventArgs args)
     {
         AiSplineHeightOffsetMeters = _configuration.Extra.AiParams.SplineHeightOffsetMeters;
         AiAcceleration = _configuration.Extra.AiParams.DefaultAcceleration;
@@ -57,13 +73,15 @@ public partial class EntryCar
         AiCorneringBrakeDistanceFactor = _configuration.Extra.AiParams.CorneringBrakeDistanceFactor;
         AiCorneringBrakeForceFactor = _configuration.Extra.AiParams.CorneringBrakeForceFactor;
         TyreDiameterMeters = _configuration.Extra.AiParams.TyreDiameterMeters;
+        AiMinSpawnProtectionTimeMilliseconds = _configuration.Extra.AiParams.MinSpawnProtectionTimeMilliseconds;
+        AiMaxSpawnProtectionTimeMilliseconds = _configuration.Extra.AiParams.MaxSpawnProtectionTimeMilliseconds;
+        AiMinCollisionStopTimeMilliseconds = _configuration.Extra.AiParams.MaxCollisionStopTimeMilliseconds;
+        AiMaxCollisionStopTimeMilliseconds = _configuration.Extra.AiParams.MaxCollisionStopTimeMilliseconds;
 
         foreach (var carOverrides in _configuration.Extra.AiParams.CarSpecificOverrides)
         {
             if (carOverrides.Model == Model)
             {
-                if (carOverrides.EnableColorChanges.HasValue)
-                    AiEnableColorChanges = carOverrides.EnableColorChanges.Value;
                 if (carOverrides.SplineHeightOffsetMeters.HasValue)
                     AiSplineHeightOffsetMeters = carOverrides.SplineHeightOffsetMeters.Value;
                 if (carOverrides.EngineIdleRpm.HasValue)
@@ -82,15 +100,26 @@ public partial class EntryCar
                     AiCorneringBrakeForceFactor = carOverrides.CorneringBrakeForceFactor.Value;
                 if (carOverrides.TyreDiameterMeters.HasValue)
                     TyreDiameterMeters = carOverrides.TyreDiameterMeters.Value;
+                if (carOverrides.MaxOverbooking.HasValue)
+                    AiMaxOverbooking = carOverrides.MaxOverbooking.Value;
+                if (carOverrides.MinSpawnProtectionTimeMilliseconds.HasValue)
+                    AiMinSpawnProtectionTimeMilliseconds = carOverrides.MinSpawnProtectionTimeMilliseconds.Value;
+                if (carOverrides.MaxSpawnProtectionTimeMilliseconds.HasValue)
+                    AiMaxSpawnProtectionTimeMilliseconds = carOverrides.MaxSpawnProtectionTimeMilliseconds.Value;
+                if (carOverrides.MinCollisionStopTimeMilliseconds.HasValue)
+                    AiMinCollisionStopTimeMilliseconds = carOverrides.MinCollisionStopTimeMilliseconds.Value;
+                if (carOverrides.MaxCollisionStopTimeMilliseconds.HasValue)
+                    AiMaxCollisionStopTimeMilliseconds = carOverrides.MaxCollisionStopTimeMilliseconds.Value;
+                if (carOverrides.VehicleLengthPreMeters.HasValue)
+                    VehicleLengthPreMeters = carOverrides.VehicleLengthPreMeters.Value;
+                if (carOverrides.VehicleLengthPostMeters.HasValue)
+                    VehicleLengthPostMeters = carOverrides.VehicleLengthPostMeters.Value;
                 
-                foreach (var skinOverrides in carOverrides.SkinSpecificOverrides)
-                {
-                    if (skinOverrides.Skin == Skin)
-                    {
-                        if (skinOverrides.EnableColorChanges.HasValue)
-                            AiEnableColorChanges = skinOverrides.EnableColorChanges.Value;
-                    }
-                }
+                AiAllowedLanes = carOverrides.AllowedLanes;
+                MinAiSafetyDistanceMetersSquared = carOverrides.MinAiSafetyDistanceMetersSquared;
+                MaxAiSafetyDistanceMetersSquared = carOverrides.MaxAiSafetyDistanceMetersSquared;
+                MinLaneCount = carOverrides.MinLaneCount;
+                MaxLaneCount = carOverrides.MaxLaneCount;
             }
         }
     }
@@ -208,17 +237,21 @@ public partial class EntryCar
         }
     }
 
-    public bool IsPositionSafe(TrafficSplinePoint point)
+    public bool IsPositionSafe(int pointId)
     {
+        ArgumentNullException.ThrowIfNull(_spline);
+        
         _aiStatesLock.EnterReadLock();
         try
         {
+            var ops = _spline.Operations;
+            
             for (var i = 0; i < _aiStates.Count; i++)
             {
                 var aiState = _aiStates[i];
                 if (aiState.Initialized 
-                    && Vector3.DistanceSquared(aiState.Status.Position, point.Position) < aiState.SafetyDistanceSquared
-                    && aiState.CurrentSplinePoint.IsSameDirection(point))
+                    && Vector3.DistanceSquared(aiState.Status.Position, ops.Points[pointId].Position) < aiState.SafetyDistanceSquared
+                    && ops.IsSameDirection(aiState.CurrentSplinePointId, pointId))
                 {
                     return false;
                 }
@@ -381,6 +414,11 @@ public partial class EntryCar
         _aiStatesLock.EnterUpgradeableReadLock();
         try
         {
+            if (AiMaxOverbooking.HasValue)
+            {
+                count = Math.Min(count, AiMaxOverbooking.Value);
+            }
+
             if (count > _aiStates.Count)
             {
                 _aiStatesLock.EnterWriteLock();

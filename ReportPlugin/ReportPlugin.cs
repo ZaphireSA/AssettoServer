@@ -6,7 +6,8 @@ using AssettoServer.Server;
 using AssettoServer.Server.Configuration;
 using AssettoServer.Server.GeoParams;
 using AssettoServer.Server.Plugin;
-using AssettoServer.Utils;
+using AssettoServer.Shared.Discord;
+using AssettoServer.Shared.Services;
 using CSharpDiscordWebhook.NET.Discord;
 using Microsoft.Extensions.Hosting;
 using Serilog;
@@ -15,8 +16,6 @@ namespace ReportPlugin;
 
 public class ReportPlugin : CriticalBackgroundService, IAssettoServerAutostart
 {
-    private static readonly string[] SensitiveCharacters = { "\\", "*", "_", "~", "`", "|", ">", ":", "@" };
-    
     internal Guid Key { get; }
     
     private readonly ReportConfiguration _configuration;
@@ -47,8 +46,8 @@ public class ReportPlugin : CriticalBackgroundService, IAssettoServerAutostart
         _entryCarManager.ClientConnected += (sender, _) =>  sender.FirstUpdateSent += OnClientFirstUpdateSent;
         _entryCarManager.ClientDisconnected += OnClientDisconnected;
         chatService.MessageReceived += OnChatMessage;
-        
-        _serverNameTruncated = serverConfiguration.Server.Name.Substring(0, Math.Min(serverConfiguration.Server.Name.Length, 80));
+
+        _serverNameTruncated = DiscordUtils.SanitizeUsername(serverConfiguration.Server.Name);
 
         if (!string.IsNullOrEmpty(_configuration.WebhookUrl))
         {
@@ -128,15 +127,6 @@ public class ReportPlugin : CriticalBackgroundService, IAssettoServerAutostart
             }
         }
     }
-    
-    private static string Sanitize(string? text)
-    {
-        text ??= "";
-        
-        foreach (string unsafeChar in SensitiveCharacters)
-            text = text.Replace(unsafeChar, $"\\{unsafeChar}");
-        return text;
-    }
 
     internal AuditLog GetAuditLog(DateTime timestamp)
     {
@@ -159,11 +149,11 @@ public class ReportPlugin : CriticalBackgroundService, IAssettoServerAutostart
                 {
                     Author = new EmbedAuthor
                     {
-                        Name = Sanitize(client.Name),
+                        Name = DiscordUtils.Sanitize(client.Name),
                         Url = $"https://steamcommunity.com/profiles/{client.Guid}"
                     },
                     Color = Color.Red,
-                    Description = Sanitize(reason),
+                    Description = DiscordUtils.Sanitize(reason),
                     Footer = new EmbedFooter
                     {
                         Text = "AssettoServer"

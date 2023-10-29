@@ -1,10 +1,10 @@
 ﻿using System.Drawing;
-using System.Text.RegularExpressions;
 using AssettoServer.Commands;
-using AssettoServer.Network.Packets.Outgoing;
 using AssettoServer.Network.Tcp;
 using AssettoServer.Server;
 using AssettoServer.Server.Configuration;
+using AssettoServer.Shared.Discord;
+using AssettoServer.Shared.Network.Packets.Outgoing;
 using CSharpDiscordWebhook.NET.Discord;
 using Serilog;
 
@@ -12,10 +12,6 @@ namespace DiscordAuditPlugin;
 
 public class Discord
 {
-    private static readonly string[] SensitiveCharacters = { "\\", "*", "_", "~", "`", "|", ">", ":", "@" };
-    // https://discord.com/developers/docs/resources/webhook#create-webhook
-    private static readonly string[] ForbiddenUsernameSubstrings = { "clyde", "discord", "@", "#", ":", "```" };
-    private static readonly string[] ForbiddenUsernames = { "everyone", "here" };
     private readonly string _serverNameSanitized;
 
     private readonly DiscordConfiguration _configuration;
@@ -25,7 +21,7 @@ public class Discord
 
     public Discord(DiscordConfiguration configuration, EntryCarManager entryCarManager, ACServerConfiguration serverConfiguration, ChatService chatService)
     {
-        _serverNameSanitized = SanitizeUsername(serverConfiguration.Server.Name);
+        _serverNameSanitized = DiscordUtils.SanitizeUsername(serverConfiguration.Server.Name);
         _configuration = configuration;
 
         if (!string.IsNullOrEmpty(_configuration.AuditUrl))
@@ -101,33 +97,35 @@ public class Discord
 
     private void OnChatMessageReceived(ACTcpClient sender, ChatEventArgs args)
     {
-        if (!args.Message.StartsWith("\t\t\t\t$CSP0:") && !string.IsNullOrWhiteSpace(args.Message))
+        if (args.Message.StartsWith("\t\t\t\t$CSP0:")
+            || string.IsNullOrWhiteSpace(args.Message)
+            || _configuration.ChatIgnoreGuids.Contains(sender.Guid)) 
+            return;
+        
+        string username;
+        string content;
+
+        if (_configuration.ChatMessageIncludeServerName)
         {
-            string username;
-            string content;
-
-            if (_configuration.ChatMessageIncludeServerName)
-            {
-                username = _serverNameSanitized;
-                content = $"**{sender.Name}:** {Sanitize(args.Message)}";
-            }
-            else
-            {
-                username = SanitizeUsername(sender.Name) ?? throw new InvalidOperationException("ACTcpClient has no name set");
-                content = Sanitize(args.Message);
-            }
-
-            DiscordMessage msg = new DiscordMessage
-            {
-                AvatarUrl = _configuration.PictureUrl,
-                Username = username,
-                Content = content,
-                AllowedMentions = new AllowedMentions()
-            };
-
-            ChatHook!.SendAsync(msg)
-                .ContinueWith(t => Log.Error(t.Exception, "Error in Discord webhook"), TaskContinuationOptions.OnlyOnFaulted);
+            username = _serverNameSanitized;
+            content = $"**{sender.Name}:** {DiscordUtils.Sanitize(args.Message)}";
         }
+        else
+        {
+            username = DiscordUtils.SanitizeUsername(sender.Name) ?? throw new InvalidOperationException("ACTcpClient has no name set");
+            content = DiscordUtils.Sanitize(args.Message);
+        }
+
+        DiscordMessage msg = new DiscordMessage
+        {
+            AvatarUrl = _configuration.PictureUrl,
+            Username = username,
+            Content = content,
+            AllowedMentions = new AllowedMentions()
+        };
+
+        ChatHook!.SendAsync(msg)
+            .ContinueWith(t => Log.Error(t.Exception, "Error in Discord webhook"), TaskContinuationOptions.OnlyOnFaulted);
     }
 
     private DiscordMessage PrepareAuditMessage(
@@ -143,7 +141,7 @@ public class Discord
         string userSteamUrl = "https://steamcommunity.com/profiles/" + clientGuid;
         DiscordMessage message = new DiscordMessage
         {
-            Username = SanitizeUsername(serverName),
+            Username = DiscordUtils.SanitizeUsername(serverName),
             AvatarUrl = _configuration.PictureUrl,
             Embeds = new List<DiscordEmbed>
             {
@@ -153,7 +151,7 @@ public class Discord
                     Color = color,
                     Fields = new List<EmbedField>
                     {
-                        new() { Name = "Name", Value = Sanitize(clientName), InLine = true },
+                        new() { Name = "Name", Value = DiscordUtils.Sanitize(clientName), InLine = true },
                         new() { Name = "Steam-GUID", Value = clientGuid + " ([link](" + userSteamUrl + "))", InLine = true }
                     }
                 }
@@ -162,39 +160,11 @@ public class Discord
         };
 
         if (adminName != null)
-            message.Embeds[0].Fields.Add(new EmbedField { Name = "By Admin", Value = Sanitize(adminName), InLine = true });
+            message.Embeds[0].Fields.Add(new EmbedField { Name = "By Admin", Value = DiscordUtils.Sanitize(adminName), InLine = true });
 
         if (reason != null)
-            message.Embeds[0].Fields.Add(new EmbedField { Name = "Message", Value = Sanitize(reason) });
+            message.Embeds[0].Fields.Add(new EmbedField { Name = "Message", Value = DiscordUtils.Sanitize(reason) });
 
         return message;
-    }
-
-    private static string Sanitize(string? text)
-    {
-        text ??= "";
-        
-        foreach (string unsafeChar in SensitiveCharacters)
-            text = text.Replace(unsafeChar, $"\\{unsafeChar}");
-        return text;
-    }
-
-    private static string SanitizeUsername(string? name)
-    {
-        name ??= "";
-
-        foreach (string str in ForbiddenUsernames)
-        {
-            if (name == str) return $"_{str}";
-        }
-
-        foreach (string str in ForbiddenUsernameSubstrings)
-        {
-            name = Regex.Replace(name, str, new string('*', str.Length), RegexOptions.IgnoreCase);
-        }
-
-        name = name.Substring(0, Math.Min(name.Length, 80));
-
-        return name;
     }
 }
